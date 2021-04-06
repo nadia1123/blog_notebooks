@@ -1,0 +1,322 @@
+---
+layout: post
+title: "What movies do critics and audiences disagree on? - An analysis in R"
+output: md_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+library(reshape2)
+library(knitr)
+```
+
+*Rotten Tomatoes* is a film aggregator site that deems movies to be "fresh" or "rotten" based on the reviews of critics. However, critics and audiences aren't always in agreement about what makes a good movie and this has been the source of many articles over the years.
+
+In this short post, I'll be analysing the data for myself using data from the *Rotten Tomatoes* site. The focus will be on data pre-processing and visualisation. I typically perform data analysis in Python/pandas. However, I'm now trying to build up skills in R and will be using R for this project.
+
+Let's get started!
+
+# Data
+
+I'll be using [this Rotten Tomatoes dataset from Kaggle](https://www.kaggle.com/stefanoleone992/rotten-tomatoes-movies-and-critic-reviews-dataset). 
+
+```{r, message=FALSE}
+rt_movies <- read_csv('rotten_tomatoes_movies.csv')
+```
+
+```{r}
+nrow(rt_movies)
+```
+
+There's less than 18k rows in this dataset but there's over 22k movies on the *Rotten Tomatoes* site, so we seem to be missing some entries. Unfortunately the Kaggle webpage for this dataset doesn't provide too much detail in this regard - we just know that the data was scraped in October 2020. It's not clear whether there are just random movies missing or whether some other piece of logic has resulted in movies being missing.
+
+Usually I would spend a large chunk of my time investigating discrepancies like this. However, as this piece of data analysis is just for fun, I won't worry about it too much. I'll just have to accept that we haven't got an exhaustive list. 
+
+# Data pre-processing
+
+This dataset includes both feature films and documentaries. I want to focus on feature films - there are a lot of political documentaries that have polarising reviews on Rotten Tomatoes, but that's not the focus of this post.
+
+So I will **remove movies where "Documentary" is the primary genre**. The dataset has a column called `genres` which contains a list of comma-separated genres, with the first genre being the primary one. I use this to create a new column called `primary_genre` and filter appropriately.
+
+```{r}
+rt_movies <- rt_movies %>%
+  mutate(primary_genre = as.character(map(str_split(genres, ','), 1)))  %>%
+  filter(primary_genre != 'Documentary') %>%
+  drop_na(primary_genre)
+```
+
+I've also decided to **take the top 5,000 movies** according to `audience_count`, the number of audience members that reviewed the movie. This means that a few ratings won't sway the score, and we should be able to recognise most of the movies. I save this to a new dataframe called `top_rt_movies`.
+
+```{r}
+top_rt_movies <- rt_movies %>%
+  drop_na(audience_count, tomatometer_count) %>%
+  arrange(desc(audience_count, tomatometer_count)) %>%
+  select(rotten_tomatoes_link, movie_title, content_rating, genres, original_release_date, tomatometer_rating, tomatometer_count, audience_rating, audience_count, movie_info, primary_genre) %>%
+  head(5000)
+```
+
+```{r}
+summary(top_rt_movies$audience_count)
+```
+
+```{r}
+summary(top_rt_movies$tomatometer_count)
+```
+
+All of the movies in `top_rt_movies` have over 17,000 audience reviews and at least 5 critic reviews.
+
+# Exploratory data analysis
+
+Now that I've prepared the dataset, I can do some exploratory data analysis.
+
+## Decade distribution
+
+Let's quickly look at movie decades. Note that there are 35 rows missing a value for `original_release_date`, and these will be omitted from the following plot.
+
+```{r}
+top_rt_movies <- top_rt_movies %>%
+  mutate(original_release_year = year(original_release_date)) %>%
+  # Create a new column that gives us the decade the movie was released
+  mutate(original_release_decade = original_release_year - (original_release_year %% 10))
+```
+
+```{r}
+ggplot(data = top_rt_movies %>% drop_na(original_release_decade)) +
+  geom_bar(mapping = aes(x = as.character(original_release_decade))) +
+  labs(x = "Decade Movie Released", y = "Number of Movies", title = "Decade Distribution of Movies")
+```
+
+The majority of movies in our dataset are from the 21st century, however, we do also have older movies, particularly from the 80s and 90s.
+
+## Score distribution
+
+Let's also look at the distribution of scores. The `tomatometer_rating` variable gives the average critic score and the `audience_rating` gives the average audience score. Both scores are on a scale from 0 to 100. 
+
+```{r, warning=FALSE}
+scores <- top_rt_movies %>%
+  select(tomatometer_rating, audience_rating) %>%
+  rename(critic = tomatometer_rating, audience = audience_rating)
+
+scores <- melt(scores)
+
+ggplot(data = scores, aes(x=value, fill=variable)) + geom_density(alpha=0.25) + 
+  labs(x = 'Score', y = 'Density', title = 'Density plots of scores', fill = 'Type of score')
+```
+
+```{r}
+summary(top_rt_movies$tomatometer_rating)
+```
+
+```{r}
+summary(top_rt_movies$audience_rating)
+```
+
+```{r}
+ggplot(data = scores, aes(variable, value)) +
+  geom_boxplot() +
+  labs(x = "", y = 'Score', title = "Boxplots of scores")
+```
+
+The density plots and boxplots show that the critic and audiences scores follow different distributions. 
+
+The critic scores have a much wider distribution. It also looks like critic scores take on more extreme values than audience scores.
+
+On the other hand, audience scores have a narrower distribution. Very few films achieve an audience score below 25%. Similarly, not many movies have an average audience score above 90%. In fact, out of the 5,000 movies considered, only 317 achieved an audience score above 90%, but 644 achieved a critic score above 90%.
+
+It's important to keep these differences in mind as we continue our analysis. 
+
+# What movies do critics and audiences disagree on?
+
+Now that we've got our data in a good state, let's look at the difference between critics and audiences. 
+
+We'll define a new variable called **critical disconnect** as $$\text{critical_disconnect = tomatometer_rating - audience_rating}$$. A positive value means the critics rated the movie higher than audiences.
+
+```{r}
+# Define column critical_disconnect
+# Also create a column movie_title_and_year which will be used to make labels on plots
+top_rt_movies <- top_rt_movies %>%
+  mutate(critical_disconnect = tomatometer_rating - audience_rating) %>%
+  mutate(movie_title_and_year = paste(top_rt_movies$movie_title, " (", top_rt_movies$original_release_year, ")", sep=""))
+```
+
+```{r}
+ggplot(data=top_rt_movies) +
+  geom_bar(aes(x=critical_disconnect), width=1) +
+  labs(x = 'Critical Disconnect', y = 'Number of Movies', title = 'Distribution of critical disconnect scores')
+```
+
+```{r}
+summary(top_rt_movies$critical_disconnect)
+```
+
+We see that the critical disconnect scores follow a left-skewed distribution. The median is negative, meaning that the majority of movies have higher audience scores. 
+
+### What movies do critics rate much higher than audiences?
+
+Now that we've defined our measure of *critical disconnect*, we can look at the highest positive values. This will give us the movies that critics rated much higher than audiences. Let's plot the top 10 movies that critics rated higher than audiences, in decreasing order of *critical disconnect*.
+
+```{r}
+critics_love_audiences_hate <- top_rt_movies %>%
+  arrange(desc(critical_disconnect), original_release_year) %>%
+  head(10)
+```
+
+```{r}
+critics_love_audiences_hate %>% 
+  arrange(critical_disconnect, desc(original_release_year)) %>%
+  mutate(movie_title_and_year=factor(movie_title_and_year, levels=movie_title_and_year)) %>%
+  ggplot(aes(x=movie_title_and_year, y = critical_disconnect)) + 
+  geom_col() +
+  labs(y = 'Critical Disconnect', title='Movies that Critics Rated Higher than Audiences') +
+  xlab(NULL) +
+  theme(axis.ticks.y=element_blank(), axis.text.y = element_blank()) +
+  geom_text(aes(label=critical_disconnect), hjust=-0.3, vjust=0.5, size=4) +
+  geom_text(aes(label=movie_title_and_year, y=2), hjust=0, size=4, color='white') +
+  coord_flip()
+```
+
+In case we don't recognise all of these movies, we can print a table of the movie synopses.
+
+```{r}
+kable(critics_love_audiences_hate %>% 
+  arrange(desc(critical_disconnect)) %>% 
+  select(movie_title_and_year, primary_genre, movie_info, tomatometer_rating, audience_rating))
+```
+
+- A few of the films - *Spy Kids*, *Antz* and *Stuart Little 2* - are aimed at kids. It's interesting to see that there's so much disagreement on these between critics and audiences.
+- *Star Wars: The Last Jedi* is tied as the top movie critics rated higher than audiences (along with *Spy Kids*) and this was a divisive film among fans of *Star Wars*. However, it is also possible that [this movie fell victim to a "review-bombing campaign" on *Rotten Tomatoes*, with some users giving a negative rating without even having seen the movie](https://www.theverge.com/2019/3/7/18254548/film-review-sites-captain-marvel-bombing-changes-rotten-tomatoes-letterboxd).
+- *Hail Caesar!* is a movie by the Coen brothers about the Hollywood film industry and stars big names such as George Clooney. Despite being loved by the critics, it was received poorly by audiences.
+- Both *Arachnophobia* and *Nurse Betty* are described as "black comedy" films on Wikipedia - it might be the case that audiences find such movies disappointing, as they don't provide the same laughs that one might expect from a comedy movie.
+- *About a Boy*, a romcom starring Hugh Grant, also achieved a much higher score from critics than audiences. Interestingly, the IMDb audience score for this movie was high and the majority of top user reviews there are highly favourable. This raises the question of whether *Rotten Tomatoes* users are somehow different to users on *IMDb*.
+
+### What movies do audiences rate much higher than critics?
+
+We can also look at the lowest negative values of *critical disconnect*. This will give us the movies that audiences rated much higher than critics.
+
+```{r}
+audiences_love_critics_hate <- top_rt_movies %>%
+  arrange(critical_disconnect) %>%
+  head(10)
+```
+
+```{r}
+audiences_love_critics_hate %>% 
+  arrange(desc(critical_disconnect), desc(original_release_year)) %>%
+  mutate(movie_title_and_year=factor(movie_title_and_year, levels=movie_title_and_year)) %>%
+  ggplot(aes(x=movie_title_and_year, y = critical_disconnect)) + 
+  geom_col() +
+  labs(y = 'Critical Disconnect', title='Movies that Audiences Rated Higher than Critics') +
+  xlab(NULL) +
+  theme(axis.ticks.y=element_blank(), axis.text.y = element_blank()) +
+  geom_text(aes(label=critical_disconnect), hjust=1.2, vjust=0.5, size=4) +
+  geom_text(aes(label=movie_title_and_year, y=2), hjust=1, nudge_y = -5, size=4, color='white') +
+  coord_flip()
+```
+
+```{r}
+kable(audiences_love_critics_hate %>% 
+  arrange(critical_disconnect, original_release_year) %>% 
+  select(movie_title_and_year, primary_genre, movie_info, tomatometer_rating, audience_rating))
+```
+
+We make the following observations:
+
+- The majority of these movies are comedies. 
+- *A Low Down Dirty Shame* is [one of very few films with a 0% tomatometer rating](https://en.wikipedia.org/wiki/List_of_films_with_a_0%25_rating_on_Rotten_Tomatoes).
+- Both *Belly* and *Drop Dead Fred* have achieved somewhat of a cult following. 
+- Three of the movies on the list are by actor/director/producer/screenwriter Tyler Perry, suggesting that his work appeals more to audiences than to critics.
+
+# Critical disconnect by movie genres
+
+In this section I'll look at the average *critical disconnect* for each genre, to see if the *critical disconnect* varies depending on genre. We are still using the sample of top 5,000 movies.
+
+```{r}
+movies_by_genre <- top_rt_movies %>%
+  group_by(primary_genre) %>%
+  summarize(avg_critics_score = mean(tomatometer_rating), 
+            avg_audience_score = mean(audience_rating),
+            count = n(),
+            avg_critical_disconnect = mean(critical_disconnect)
+            ) %>%  
+  filter(count >= 100)
+```
+
+```{r}
+kable(movies_by_genre %>%
+  arrange(desc(avg_critical_disconnect)))
+```
+
+The plot below visualises this information. Each point represents the average critics and audience score for movies of that genre. The dotted line is the line where average audience score equals the average critic’s score. 
+
+```{r}
+ggplot(data=movies_by_genre, aes(x=avg_critics_score, y=avg_audience_score, color=primary_genre)) + 
+  geom_jitter() +
+  geom_text(aes(label=primary_genre), vjust=-1, size = 3) + 
+  theme(legend.position = "none") + 
+  geom_abline(intercept = 0, slope = 1, linetype = "dotted") +
+  labs(x = 'Average Critic\'s Score', y = 'Average Audience Score',  title = 'Critical Disconnect by Movie Genre') +
+  xlim(35,90) +
+  ylim(35,90)
+```
+
+The graph suggests that the magnitude of the *critical disconnect* does vary by genre somewhat.
+
+The genres with the greatest *critical disconnect* are “Comedy”, “Action & Adventure”, and Drama”. Movies in these genres received on average 9.5, 7.4, and 7 more points from audiences compared to critics, respectively.
+
+In fact, every genre had a higher average audience score, with the exception of the small “Classics” genre, which includes older movies from a variety of genres. When I took the secondary genre as the primary genre for these, the results were similar. So on average, audiences are more generous than critics for every genre. 
+
+# Critical disconnect by decade
+
+We can do a similar analysis looking at the decade the movie was released. Remember, the majority of the movies in our dataset are from the 21st century. 
+
+```{r}
+movies_by_decade <- top_rt_movies %>%
+  group_by(original_release_decade) %>%
+  summarize(avg_critics_score = mean(tomatometer_rating), 
+            avg_audience_score = mean(audience_rating),
+            count = n(),
+            avg_critical_disconnect = mean(critical_disconnect)
+            ) %>%  
+  filter(count >= 100)
+```
+
+
+```{r}
+kable(movies_by_decade %>%
+  arrange(desc(avg_critical_disconnect)))
+```
+
+```{r}
+ggplot(data=movies_by_decade, aes(x=original_release_decade, y=avg_critical_disconnect)) +
+  geom_col() +
+  labs(x= 'Original Release Decade', y = 'Average Critical Disconnect', title='Critical Disconnect by Movie Decade') 
+```
+
+This plot shows the average *critical disconnect* for each decade of movie release. We see that on average, movies from the 60s and 70s were rated more favourably by the critics than by audiences (as indicated by the positive average *critical disconnect*). On the other hand, movies from the 90s and 00s received on average much higher scores from audiences than from critics.  
+
+# Conclusion
+
+In this post we used data from Rotten Tomatoes to identify which movies have the highest disagreement between critics and audiences. We did this by defining a metric we refer to as *critical disconnect*. 
+
+The findings suggests that critics do not always understand what will appeal to audiences, particularly in the case of the movies we listed above. For instance, it looks like the audiences disagreed with the critics on movies such as *Spy Kids*, *Star Wars: The Last Jedi*, *Antz*, *Hail Caesar!* and *About a Boy*.
+
+Furthermore, the differences in average critical disconnect among different genres and movie release decades suggests that there are certain categories of movies where critics are more out of touch.  
+
+However, a lot of these observations may actually be explained by **selection bias**, as suggested in [this *New York Times* article by Catherine Rampell](economix.blogs.nytimes.com/2013/08/14/reviewing-the-movies-audiences-vs-critics/). Unlike critics, audiences *choose* which movies they will watch, and are therefore more likely to go watch movies that they know they will probably enjoy. 
+
+In fact, this selection bias explains the difference in critic and audience score distributions. Critic scores take on a wider range of values because they are paid to watch all sorts of movies, including ones they wouldn't choose to watch otherwise. This is why some critic scores are particularly low. On the other hand, audiences will generally only watch movies they think they will enjoy, meaning most scores will be fairly positive. This feels particularly relevant for the movies that audiences rated much higher than the critics - the people watching those movies are probably already likely to enjoy those kinds of movies. 
+
+This illustrates the need to *always think carefully about any biases in our data*.
+
+# Next steps
+
+As always, this piece of analysis raises more questions, such as:
+
+- How do critics scores compare to IMDb user scores?
+- How can we build an interactive visualisation to present these results?
+- What movies do *critics* disagree on? 
+- What movies do *audience members* disagree on? 
+- Which critic has the lowest "critical disconnect", or in other words, most reflects audiences' opinions?
+- Can we build a model to predict critic scores?
